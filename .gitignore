@@ -5,4 +5,7 @@ __pycache__/
 *.db-wal
 *.db-shm
 shadow_*.db
+sync_snapshot_*.db
+sync_snapshot_*.db-wal
+sync_snapshot_*.db-shm
 .venv/

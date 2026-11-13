@@ -11,6 +11,7 @@ import csv
 import io
 import sqlite3
 
+from .changelog import record_import_changes
 from .db import utcnow_iso
 
 # 表头别名 -> 规范字段
@@ -104,6 +105,18 @@ def import_batch(conn: sqlite3.Connection, filename: str, records: list[dict]) -
             " VALUES (?, ?, ?, ?, ?)",
             [(batch_id, r["station"], r["sample_day"], r["analyte"], r["result"]) for r in records],
         )
+        # 在 upsert 之前抓取每个键的旧状态（来源批次），供变更组精确比对：
+        # 新键或来源批次将被本次批次替换的键才算「真正变化」。
+        old_source = {}
+        for r in records:
+            old = conn.execute(
+                "SELECT source_batch FROM current_results"
+                " WHERE station = ? AND sample_day = ? AND analyte = ?",
+                (r["station"], r["sample_day"], r["analyte"]),
+            ).fetchone()
+            old_source[(r["station"], r["sample_day"], r["analyte"])] = (
+                old["source_batch"] if old is not None else None
+            )
         # 同键取最新批次：仅当新批次号大于当前来源批次时才覆盖，
         # 防止任何迟到/乱序写入覆盖更新值。
         conn.executemany(
@@ -121,6 +134,9 @@ def import_batch(conn: sqlite3.Connection, filename: str, records: list[dict]) -
                 for r in records
             ],
         )
+        # 与正式结果同事务：只把真正变化的键记成一个递增编号的变更组；
+        # 没有任何变化（全部未被接受）则不产变更组。
+        record_import_changes(conn, batch_id, records, old_source)
         conn.commit()
     except Exception:
         conn.rollback()

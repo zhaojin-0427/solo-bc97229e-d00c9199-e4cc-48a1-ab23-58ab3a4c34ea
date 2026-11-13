@@ -21,6 +21,7 @@ import sqlite3
 import threading
 import time
 
+from .changelog import record_revoke_changes
 from .db import connect, utcnow_iso
 
 # 每批处理的键数量与节流，便于演示进度；生产可调大/调小
@@ -325,6 +326,12 @@ class RevokeManager:
             # 读者在 WAL 下继续读到完整的旧快照
             conn.execute("BEGIN IMMEDIATE")
             try:
+                # 保存切换前的完整正式状态，供变更组比对（临时表随事务结束自动清理）
+                conn.execute(
+                    "CREATE TEMP TABLE old_results AS"
+                    " SELECT station, sample_day, analyte, result, source_batch"
+                    " FROM current_results"
+                )
                 conn.execute("DELETE FROM current_results")
                 # 影子结果 = 撤销生效后、快照时刻的完整正式状态
                 conn.execute(
@@ -364,6 +371,9 @@ class RevokeManager:
                     "UPDATE batches SET status = 'revoked' WHERE batch_id = ?",
                     (revoked_batch,),
                 )
+                # 与正式结果同事务提交变更组：upsert 返回完整新记录，
+                # 消失的键只返回键；没有任何真正变化则不产组。
+                record_revoke_changes(conn, job_id, "old_results")
                 conn.commit()
             except Exception:
                 conn.rollback()

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>环境检测数仓 · 批次管理</title>
+<title>环境检测数仓 · 批次管理与增量同步</title>
 <style>
   :root { --bd:#d9dee7; --bg:#f5f7fa; --pri:#2563eb; --ok:#15803d; --warn:#b45309; --bad:#b91c1c; }
   * { box-sizing: border-box; }
@@ -17,17 +17,20 @@
   .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; }
   button { border:0; border-radius:8px; padding:9px 18px; font-size:14px; cursor:pointer; background:var(--pri); color:#fff; }
   button.secondary { background:#475569; }
+  button.small { padding:5px 12px; font-size:12px; }
   button:disabled { opacity:.45; cursor:not-allowed; }
   input[type=file] { font-size:14px; }
+  input[type=number], input[type=text] { padding:8px 10px; border:1px solid var(--bd); border-radius:8px; font-size:13px; }
+  input[type=text] { min-width:300px; font-family:ui-monospace,Menlo,monospace; font-size:12px; }
   table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { border-bottom:1px solid var(--bd); padding:8px 10px; text-align:left; }
+  th, td { border-bottom:1px solid var(--bd); padding:8px 10px; text-align:left; vertical-align:top; }
   th { background:#f1f5f9; position:sticky; top:0; }
   .tag { display:inline-block; padding:2px 10px; border-radius:999px; font-size:12px; }
   .tag.active { background:#dcfce7; color:var(--ok); }
   .tag.revoking { background:#fef3c7; color:var(--warn); }
   .tag.revoked { background:#fee2e2; color:var(--bad); }
-  .tag.pending, .tag.running { background:#fef3c7; color:var(--warn); }
-  .tag.done { background:#dcfce7; color:var(--ok); }
+  .tag.pending, .tag.running, .tag.building { background:#fef3c7; color:var(--warn); }
+  .tag.done, .tag.ready { background:#dcfce7; color:var(--ok); }
   .tag.failed { background:#fee2e2; color:var(--bad); }
   .bar { height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; min-width:160px; }
   .bar > i { display:block; height:100%; background:var(--pri); transition:width .3s; }
@@ -36,12 +39,20 @@
   .muted { color:#64748b; font-size:12px; }
   .scroll { max-height:340px; overflow:auto; }
   code { background:#f1f5f9; padding:1px 6px; border-radius:4px; }
+  .cursor-box { width:100%; font-family:ui-monospace,Menlo,monospace; font-size:11px;
+    background:#f8fafc; border:1px solid var(--bd); border-radius:6px; padding:6px 8px;
+    word-break:break-all; max-height:54px; overflow:auto; }
+  .panel { border:1px solid var(--bd); border-radius:10px; padding:14px; margin-top:14px; background:#f8fafc; }
+  .panel h3 { margin:0 0 10px; font-size:14px; }
+  .kv { font-size:12px; color:#475569; display:grid; gap:4px; }
+  pre.json { background:#0f172a; color:#dbeafe; border-radius:8px; padding:10px;
+    font-size:11px; max-height:280px; overflow:auto; margin:8px 0 0; white-space:pre-wrap; word-break:break-all; }
 </style>
 </head>
 <body>
 <header>
-  <h1>环境检测数据仓库 · 批次导入与撤销</h1>
-  <p>同键取最大未撤销批次 · 撤销在后台影子重建并原子切换 · 重建期间可继续导入</p>
+  <h1>环境检测数据仓库 · 批次导入 / 撤销 / 增量同步接入</h1>
+  <p>同键取最大未撤销批次 · 撤销在后台影子重建并原子切换 · 同步接入固定时刻快照分页取数、游标拉取完整变更组</p>
 </header>
 <main>
   <section class="card">
@@ -84,6 +95,65 @@
         <thead><tr><th>站点</th><th>采样日</th><th>检测项目</th><th>结果</th><th>来源批次</th></tr></thead>
         <tbody id="resultBody"><tr><td colspan="5" class="muted">加载中…</td></tr></tbody>
       </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>⑤ 同步接入（增量取数，避免每天重拉全库）</h2>
+    <div class="row">
+      <label class="muted">初始快照每页行数
+        <input type="number" id="syncPageSize" value="100" min="1" max="1000" style="width:110px">
+      </label>
+      <button id="btnCreateAccess">创建接入（后台构建固定时刻快照）</button>
+      <span class="muted">构建期间上传、撤销、取数继续可用；未完成接入在重启后标记失败且不供数</span>
+    </div>
+    <div id="syncMsg" class="muted" style="margin-top:8px"></div>
+
+    <div class="scroll" style="margin-top:12px">
+      <table>
+        <thead><tr><th>接入号</th><th>状态</th><th>快照行数/进度</th><th>快照截止组</th>
+        <th>创建/就绪时间 (UTC)</th><th>起始游标</th><th>操作</th></tr></thead>
+        <tbody id="accessBody"><tr><td colspan="7" class="muted">加载中…</td></tr></tbody>
+      </table>
+    </div>
+
+    <div class="panel" id="syncPanel" style="display:none">
+      <h3>接入 <span id="panelAccessId"></span> 取数面板</h3>
+      <div class="kv" id="panelMeta"></div>
+
+      <div style="margin-top:10px">
+        <strong class="muted">初始数据（分页）</strong>
+        <div class="row" style="margin-top:6px">
+          <button class="small" id="btnFirstPage">读第一页</button>
+          <button class="small secondary" id="btnNextPage">读下一页</button>
+          <span class="muted" id="pageInfo"></span>
+        </div>
+        <div class="scroll" style="max-height:220px;margin-top:8px">
+          <table>
+            <thead><tr><th>站点</th><th>采样日</th><th>检测项目</th><th>结果</th><th>来源批次</th></tr></thead>
+            <tbody id="initialBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div style="margin-top:14px">
+        <strong class="muted">变更拉取（每次返回下一完整组，不拆组；已发布组可重复读）</strong>
+        <div class="row" style="margin-top:6px">
+          <button class="small" id="btnPullChanges">按游标拉取下一变更组</button>
+          <span class="muted" id="changeInfo"></span>
+        </div>
+        <div class="row" style="margin-top:6px">
+          <input type="text" id="cursorInput" placeholder="粘贴游标（留空使用当前接入游标）">
+          <button class="small secondary" id="btnUseCursor">使用输入游标拉取</button>
+        </div>
+        <div id="changeBody" class="scroll" style="max-height:220px;margin-top:8px"></div>
+      </div>
+
+      <div style="margin-top:10px">
+        <span class="muted">当前游标（复制保存，重启后仍可继续）：</span>
+        <div class="cursor-box" id="currentCursor"></div>
+      </div>
+      <pre class="json" id="rawJson" style="display:none"></pre>
     </div>
   </section>
 </main>
@@ -163,6 +233,153 @@ window.revoke = async (batchId) => {
   showMsg(data.message || data.error, data.ok);
   refresh();
 };
+
+// ---------------- 同步接入 ----------------
+const syncState = {
+  list: [],
+  selected: null,      // 当前打开面板的接入号
+  initialCursor: null, // 下一页初始数据游标
+  changeCursor: null,  // 下一次变更拉取游标
+};
+
+function showSyncMsg(text, ok) {
+  const el = $('syncMsg');
+  el.textContent = text;
+  el.style.color = ok ? 'var(--ok)' : 'var(--bad)';
+}
+
+async function refreshAccesses(keepPanel) {
+  syncState.list = await fetch('/api/sync/accesses').then(r => r.json());
+  const anyBuilding = syncState.list.some(a => a.status === 'building');
+
+  $('accessBody').innerHTML = syncState.list.length ? syncState.list.map(a => `
+    <tr>
+      <td>${a.access_id}</td>
+      <td><span class="tag ${a.status}">${a.status}</span></td>
+      <td>${a.status === 'building'
+        ? `${a.rows_done ?? 0} 行（构建中…）`
+        : `${a.snapshot_rows} 行`}
+        ${a.error ? `<div class="muted">${esc(a.error)}</div>` : ''}</td>
+      <td>${a.snapshot_max_group}</td>
+      <td>${esc(a.created_at)}<br><span class="muted">${a.ready_at ? esc(a.ready_at) : '—'}</span></td>
+      <td style="max-width:220px"><div class="cursor-box">${a.cursor ? esc(a.cursor) : '—'}</div></td>
+      <td>${a.status === 'ready'
+        ? `<button class="small" onclick="openPanel(${a.access_id})">取数</button>`
+        : '<span class="muted">—</span>'}</td>
+    </tr>`).join('') : '<tr><td colspan="7" class="muted">暂无接入</td></tr>';
+
+  if (anyBuilding) setTimeout(() => refreshAccesses(true), 1000);
+  if (keepPanel && syncState.selected) renderPanelMeta();
+}
+
+window.openPanel = (accessId) => {
+  syncState.selected = accessId;
+  syncState.initialCursor = null;
+  syncState.changeCursor = null;
+  $('syncPanel').style.display = 'block';
+  $('initialBody').innerHTML = '';
+  $('changeBody').innerHTML = '';
+  $('rawJson').style.display = 'none';
+  $('pageInfo').textContent = '';
+  $('changeInfo').textContent = '';
+  $('cursorInput').value = '';
+  renderPanelMeta();
+};
+
+function currentAccess() {
+  return syncState.list.find(a => a.access_id === syncState.selected);
+}
+
+function renderPanelMeta() {
+  const a = currentAccess();
+  if (!a) return;
+  $('panelAccessId').textContent = a.access_id;
+  $('panelMeta').innerHTML = `
+    状态：<span class="tag ${a.status}">${a.status}</span>
+    ｜快照行数：${a.snapshot_rows}
+    ｜快照截止变更组：${a.snapshot_max_group}
+    ｜每页行数：${a.page_size}`;
+  const cursor = syncState.changeCursor || a.cursor;
+  $('currentCursor').textContent = cursor || '';
+}
+
+$('btnCreateAccess').onclick = async () => {
+  const page_size = parseInt($('syncPageSize').value, 10);
+  const res = await fetch('/api/sync/accesses', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ page_size }),
+  });
+  const data = await res.json();
+  showSyncMsg(data.message || data.error, data.ok);
+  refreshAccesses();
+};
+
+$('btnFirstPage').onclick = async () => {
+  syncState.initialCursor = null;
+  await loadInitialPage();
+};
+
+$('btnNextPage').onclick = loadInitialPage;
+
+async function loadInitialPage() {
+  const id = syncState.selected;
+  const params = new URLSearchParams();
+  if (syncState.initialCursor) params.set('cursor', syncState.initialCursor);
+  const res = await fetch(`/api/sync/accesses/${id}/initial?${params}`);
+  const data = await res.json();
+  if (!res.ok) { showSyncMsg(data.error, false); return; }
+  syncState.initialCursor = data.next_cursor;
+  $('initialBody').innerHTML = data.records.length ? data.records.map(r => `
+    <tr><td>${esc(r.station)}</td><td>${esc(r.sample_day)}</td><td>${esc(r.analyte)}</td>
+        <td>${r.result}</td><td>${r.source_batch}</td></tr>`).join('')
+    : '<tr><td colspan="5" class="muted">本页无记录</td></tr>';
+  $('pageInfo').textContent = data.next_phase === 'changes'
+    ? `初始数据已读完（本页 ${data.records.length} 条），游标已切换到变更阶段`
+    : `本页 ${data.records.length} 条，继续点「读下一页」`;
+  // 初始读完后把变更游标定位到切换后的游标
+  if (data.next_phase === 'changes') syncState.changeCursor = data.next_cursor;
+  $('currentCursor').textContent = data.next_cursor;
+  $('rawJson').style.display = 'block';
+  $('rawJson').textContent = JSON.stringify(data, null, 2);
+}
+
+$('btnPullChanges').onclick = () => pullChanges(syncState.changeCursor);
+$('btnUseCursor').onclick = () => {
+  const token = $('cursorInput').value.trim();
+  if (!token) return showSyncMsg('请先粘贴游标', false);
+  pullChanges(token);
+};
+
+async function pullChanges(cursor) {
+  const id = syncState.selected;
+  const params = new URLSearchParams();
+  if (cursor) params.set('cursor', cursor);
+  const res = await fetch(`/api/sync/accesses/${id}/changes?${params}`);
+  const data = await res.json();
+  if (!res.ok) { showSyncMsg(data.error, false); return; }
+  syncState.changeCursor = data.next_cursor;
+  if (!data.group) {
+    $('changeInfo').textContent = '没有新的变更组（游标停在最新组，可稍后再拉）';
+    $('changeBody').innerHTML = '<div class="muted">— 无新变更 —</div>';
+  } else {
+    const g = data.group;
+    $('changeInfo').textContent =
+      `返回完整组 #${g.group_id}（${g.kind}，引用 ${g.ref_id}，${g.entry_count} 条，未拆组）`;
+    $('changeBody').innerHTML = `<table>
+      <thead><tr><th>类型</th><th>站点</th><th>采样日</th><th>检测项目</th><th>结果</th><th>来源批次</th></tr></thead>
+      <tbody>${data.entries.map(e => `
+        <tr><td><span class="tag ${e.change_type === 'delete' ? 'revoked' : 'ready'}">${e.change_type}</span></td>
+            <td>${esc(e.station)}</td><td>${esc(e.sample_day)}</td><td>${esc(e.analyte)}</td>
+            <td>${e.result ?? '—'}</td><td>${e.source_batch ?? '—'}</td></tr>`).join('')}
+      </tbody></table>`;
+  }
+  $('currentCursor').textContent = data.next_cursor;
+  $('rawJson').style.display = 'block';
+  $('rawJson').textContent = JSON.stringify(data, null, 2);
+  showSyncMsg('拉取成功', true);
+}
+
+refreshAccesses();
 
 loop();
 </script>

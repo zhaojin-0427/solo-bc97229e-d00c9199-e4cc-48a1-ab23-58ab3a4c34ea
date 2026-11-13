@@ -10,6 +10,9 @@ services:
       # 重建节流参数，调大可在演示时看清后台进度；生产可调小
       REBUILD_PAGE_SIZE: "10"
       REBUILD_SLEEP: "0.15"
+      # 同步接入初始快照默认每页行数与上限（内存按页占用，不随总行数增长）
+      SYNC_PAGE_SIZE: "100"
+      SYNC_MAX_PAGE_SIZE: "1000"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/results')"]
